@@ -17,9 +17,8 @@
 use egui::{Color32, RichText};
 use serde_json::{Value, json};
 
-use crate::FilmcraftApp;
 use crate::state::{LinkMediaDraft, ProjectManagerDraft, ProxyDraft};
-use crate::RelinkHint;
+use crate::{FilmcraftApp, RelinkHint};
 
 type Elems = Vec<(String, egui::Rect, String)>;
 
@@ -82,7 +81,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
             let item = app.session.state.project_selection.first().copied();
             let Some(item) = item else { return Some(Err("select a clip in the Project panel".into())) };
             let exts: Vec<&str> = filmcraft_media::VIDEO_EXTENSIONS.to_vec();
-            let hint = RelinkHint { item: item.0, params: serde_json::json!({"item": item.0}) };
+            let hint = RelinkHint { command: id.to_string(), params: json!({"item": item.0}) };
             let picked = if let Some(picker) = app.hooks.pick_file_for_relink.as_mut() {
                 picker(&exts, Some(hint))
             } else if let Some(picker) = app.hooks.pick_files.as_mut() {
@@ -335,7 +334,9 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
         Some("locate") => {
             let exts: Vec<&str> =
                 filmcraft_media::VIDEO_EXTENSIONS.iter().chain(filmcraft_media::AUDIO_EXTENSIONS).chain(filmcraft_media::STILL_EXTENSIONS).copied().collect();
-            let hint = RelinkHint { item, params: match_params(&d) };
+            let mut params = match_params(&d);
+            params["item"] = json!(item);
+            let hint = RelinkHint { command: "media.relink".into(), params };
             let picked = if let Some(picker) = app.hooks.pick_file_for_relink.as_mut() {
                 picker(&exts, Some(hint))
             } else if let Some(picker) = app.hooks.pick_files.as_mut() {

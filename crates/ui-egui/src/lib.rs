@@ -88,17 +88,10 @@ pub struct HostHooks {
     pub pick_open_file: Option<Box<dyn FnMut(&str, &[&str]) -> Option<String>>>,
     /// Folder picker (Link Media search, proxy and Project Manager destinations).
     pub pick_folder: Option<Box<dyn FnMut() -> Option<String>>>,
-    /// Pick a single file for a command that needs its path back synchronously
-    /// (Link Media Locate, attachProxies, reconnectFullRes). The chosen file
-    /// MUST end up registered under a virtual path the caller can act on; the
-    /// existing [`Self::pick_files`] imports the chosen file as a new project
-    /// item, which is wrong for those commands. Native hosts open an rfd
-    /// dialog and return the first picked path; the web build registers the
-    /// file in `/files/<name>` (instead of importing it) and runs the relink
-    /// itself when the picker resolves (the browser picker is async). The
-    /// `hint`, when `Some`, lets the web host route the chosen file through
-    /// `media.relink` with the same item id and match parameters the caller
-    /// would have used; native hosts ignore it.
+    /// Pick one file for a command that relinks to it (Link Media ▸ Locate…, Attach Proxies,
+    /// Reconnect Full Resolution) instead of importing it, as [`Self::pick_files`] does. Native
+    /// hosts return the path. A host whose picker is asynchronous (the web) returns `None` and
+    /// runs `hint.command` with `hint.params` plus `"path"` itself once the user has chosen.
     pub pick_file_for_relink: Option<Box<dyn FnMut(&[&str], Option<RelinkHint>) -> Option<String>>>,
     /// Bring the window on screen for control-channel UI requests *without* taking keyboard focus
     /// (macOS: `orderFrontRegardless`). Without it the app only requests a repaint: it never
@@ -109,15 +102,13 @@ pub struct HostHooks {
     pub open_path: Option<Box<dyn FnMut(&str, bool) -> Result<(), String>>>,
 }
 
-/// What the caller of `pick_file_for_relink` plans to do with the chosen file:
-/// the missing `media.relink` parameters. Web uses this to skip the import flow
-/// and run `media.relink` directly; native hosts ignore it because the rfd
-/// dialog returns the path synchronously.
+/// The command a [`HostHooks::pick_file_for_relink`] caller runs with the chosen file, for hosts
+/// that can only run it later.
 #[derive(Clone, Debug)]
 pub struct RelinkHint {
-    pub item: u64,
-    /// Forwarded as-is into `media.relink` (item/path merged in by the web host,
-    /// merged with the chosen path by the native caller).
+    /// `media.relink`, `media.attachProxies` or `media.reconnectFullRes`.
+    pub command: String,
+    /// Its parameters, without `"path"`.
     pub params: serde_json::Value,
 }
 
@@ -1604,41 +1595,5 @@ mod gpu_fallback_tests {
         assert_eq!(super::plan_side(&p), 1920);
         let p = FramePlan::Image(filmcraft_render::Image::new(800, 4000));
         assert_eq!(super::plan_side(&p), 4000);
-    }
-}
-
-// Regression test for issue #111: the web build's `pick_files` hook returned
-// `Vec::new()` (because the browser picker is async), so Link Media Locate,
-// `media.attachProxies` and `media.reconnectFullRes` ran the command without a
-// path and silently dropped the chosen file as a new project item. The fix
-// adds a separate `pick_file_for_relink` hook that returns the chosen file's
-// virtual path synchronously; if the host hasn't installed it, the call sites
-// fall back to `pick_files` (which still imports — that path is intentionally
-// unchanged).
-#[cfg(test)]
-mod pick_file_for_relink_tests {
-    use super::{HostHooks, RelinkHint};
-
-    #[test]
-    fn relink_hook_returns_path_synchronously_where_pick_files_returns_empty() {
-        // Simulate the web build pre-fix: pick_files hands back Vec::new() and
-        // imports the file later. Callers that need a path see `None`.
-        let mut pick_files: Box<dyn FnMut(&[&str]) -> Vec<String>> =
-            Box::new(|_exts| Vec::new());
-        let paths = pick_files(&["mp4"]);
-        assert!(paths.is_empty(), "pre-fix web pick_files returns no paths");
-
-        // Simulate the fix: pick_file_for_relink returns the chosen path synchronously.
-        let mut pick_for_relink: Box<dyn FnMut(&[&str], Option<RelinkHint>) -> Option<String>> =
-            Box::new(|_exts, _hint| Some("/files/clip.mp4".to_string()));
-        let got = pick_for_relink(&["mp4"], Some(RelinkHint { item: 1, params: serde_json::json!({}) }));
-        assert_eq!(got.as_deref(), Some("/files/clip.mp4"));
-    }
-
-    #[test]
-    fn default_host_hooks_have_no_picker_set() {
-        let h = HostHooks::default();
-        assert!(h.pick_files.is_none());
-        assert!(h.pick_file_for_relink.is_none());
     }
 }

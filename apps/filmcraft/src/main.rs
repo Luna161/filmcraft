@@ -171,12 +171,9 @@ fn main() -> eframe::Result {
             app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
                 rfd::FileDialog::new().add_filter("Media", exts).pick_files().unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect()
             }));
-            // Same dialog as pick_files but returns a single path without touching the import flow.
-// Used by commands that need the chosen file's path back (Link Media Locate,
-// attachProxies, reconnectFullRes); pick_files would silently import it instead.
-            app.hooks.pick_file_for_relink = Some(Box::new(|exts: &[&str], _hint| {
-                rfd::FileDialog::new().add_filter("Media", exts).pick_file().map(|p| p.to_string_lossy().to_string())
-            }));
+            // Link Media ▸ Locate…, Attach Proxies, Reconnect Full Resolution: one path, not imported.
+            app.hooks.pick_file_for_relink =
+                Some(Box::new(|exts: &[&str], _hint| rfd::FileDialog::new().add_filter("Media", exts).pick_file().map(|p| p.to_string_lossy().to_string())));
             app.hooks.pick_save = Some(Box::new(|name: &str| {
                 rfd::FileDialog::new().add_filter("FilmCraft Project", &["fcproj"]).set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string())
             }));

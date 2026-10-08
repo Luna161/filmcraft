@@ -139,32 +139,8 @@ pub async fn open_project_file(file: web_sys::File) -> Result<Value, String> {
 }
 
 /// Handle files from a picker or a drop: projects open, everything else is imported.
-/// If `PENDING_RELINK` is set, the first file is registered and routed to a
-/// `media.relink` call instead of being imported (Link Media Locate, attachProxies,
-/// reconnectFullRes on the web build).
 pub fn take_files(files: Vec<web_sys::File>) {
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(pending) = PENDING_RELINK.with(|s| s.borrow_mut().take()) {
-            // Relink flow: only the first file matters.
-            let Some(f) = files.into_iter().next() else { return };
-            let path = fs::register_blob(&f.name(), f.clone().into());
-            crate::recovery::keep_media(&path, &f);
-            let params = pending.1;
-            let outcome = on_ui(move |w, _| {
-                w.app.session.execute("media.relink", merge_relink_params(params, path)).map_err(|e| e.to_string())
-            })
-            .await;
-            crate::post(move |w, _| {
-                match outcome {
-                    Ok(v) => {
-                        let n = v.get("relinked").and_then(Value::as_array).map_or(0, |a| a.len());
-                        w.app.ui.status = format!("Linked {n} clip(s)");
-                    }
-                    Err(e) => w.app.ui.status = e,
-                }
-            });
-            return;
-        }
         let (projects, media): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| f.name().to_ascii_lowercase().ends_with(".fcproj"));
         for p in projects {
             if let Err(e) = open_project_file(p).await {
@@ -177,30 +153,30 @@ pub fn take_files(files: Vec<web_sys::File>) {
     });
 }
 
-fn merge_relink_params(params: Value, path: String) -> Value {
-    let mut p = params;
-    if let Some(obj) = p.as_object_mut() {
-        obj.insert("path".to_string(), Value::String(path));
-    } else {
-        p = json!({ "path": path });
-    }
-    p
-}
-
-thread_local! {
-    /// Pending relink request set by `pick_for_relink`. Consumed by `take_files`.
-    static PENDING_RELINK: RefCell<Option<(u64, Value)>> = const { RefCell::new(None) };
-}
-
-/// Open the file picker so the user can pick a single file to relink a missing
-/// project item to. The chosen file is registered in `/files/<name>` (so it
-/// shows up at the same path the project stored) and a `media.relink` command
-/// runs as soon as the picker resolves. Returns `None` synchronously because
-/// the browser picker is async — the actual relink happens later.
-pub fn pick_for_relink(exts: &[&str], item: u64, params: Value) -> Option<String> {
-    PENDING_RELINK.with(|s| *s.borrow_mut() = Some((item, params)));
-    pick(exts, false);
-    None
+/// Files a picker returned: imported, or with a relink hint, the first one is registered under
+/// `/files/<name>` and the hint's command runs on it (#111).
+fn picked(files: Vec<web_sys::File>, relink: Option<RelinkHint>) {
+    let Some(hint) = relink else { return take_files(files) };
+    let Some(f) = files.into_iter().next() else { return };
+    wasm_bindgen_futures::spawn_local(async move {
+        let path = fs::register_blob(&f.name(), f.clone().into());
+        crate::recovery::keep_media(&path, &f);
+        let mut params = hint.params;
+        if !params.is_object() {
+            params = json!({});
+        }
+        params["path"] = json!(path);
+        let command = hint.command;
+        let outcome = on_ui(move |w, _| w.app.session.execute(&command, params).map_err(|e| e.to_string())).await;
+        crate::post(move |w, _| match outcome {
+            Ok(v) => {
+                if let Some(n) = v.get("relinked").and_then(Value::as_array).map(Vec::len) {
+                    w.app.status(format!("Linked {n} clip(s)"));
+                }
+            }
+            Err(e) => w.app.status(e),
+        });
+    });
 }
 
 fn has_fsa_picker() -> bool {
@@ -209,6 +185,11 @@ fn has_fsa_picker() -> bool {
 
 /// Let the user pick files: `showOpenFilePicker` when available, else a file input.
 pub fn pick(exts: &[&str], multiple: bool) {
+    pick_then(exts, multiple, None);
+}
+
+/// [`pick`], handing the files to [`picked`]: a cancelled picker leaves nothing pending.
+fn pick_then(exts: &[&str], multiple: bool, relink: Option<RelinkHint>) {
     let accept: Vec<String> = exts.iter().map(|e| format!(".{e}")).collect();
     if has_fsa_picker() {
         let opts = js_sys::Object::new();
@@ -228,7 +209,7 @@ pub fn pick(exts: &[&str], multiple: bool) {
                     files.push(f);
                 }
             }
-            take_files(files);
+            picked(files, relink);
         });
         return;
     }
@@ -240,7 +221,7 @@ pub fn pick(exts: &[&str], multiple: bool) {
     let inp = input.clone();
     let on_change = Closure::<dyn FnMut()>::new(move || {
         if let Some(list) = inp.files() {
-            take_files((0..list.length()).filter_map(|i| list.get(i)).collect());
+            picked((0..list.length()).filter_map(|i| list.get(i)).collect(), relink.clone());
         }
     });
     input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
@@ -281,12 +262,11 @@ pub fn install_hooks(app: &mut FilmcraftApp) {
     // Saving writes the file in memory and offers it as a download (`fs::WebServices`).
     app.hooks.pick_save = Some(Box::new(|name: &str| Some(format!("/projects/{name}"))));
     app.hooks.pick_save_as = Some(Box::new(|_filter: &str, _exts: &[&str], name: &str| Some(format!("/exports/{name}"))));
-    // For Link Media Locate, attachProxies and reconnectFullRes. The browser picker is async, so
-    // we set a pending slot and open the picker; `take_files` consumes the slot and runs
-    // `media.relink` itself with the hint the caller passed in.
+    // Link Media ▸ Locate…, Attach Proxies, Reconnect Full Resolution: the picker is async, so the
+    // hint's command runs once the user has chosen (#111).
     app.hooks.pick_file_for_relink = Some(Box::new(|exts: &[&str], hint: Option<RelinkHint>| {
-        if let Some(h) = hint {
-            pick_for_relink(exts, h.item, h.params);
+        if hint.is_some() {
+            pick_then(exts, false, hint);
         }
         None
     }));
